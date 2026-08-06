@@ -5,17 +5,17 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app
     envVars:
-      - key: AZURE_CLIENT_ID
+      - key: GMAIL_USER
         sync: false
-      - key: AZURE_CLIENT_SECRET
+      - key: GMAIL_APP_PASSWORD
         sync: false
-      - key: AZURE_TENANT_ID
+      - key: REPLY_TO_EMAIL
+        value: AP3@SeacrestSW.com
+      - key: APP_USERNAME
         sync: false
-      - key: SENDER_EMAIL
+      - key: APP_PASSWORD_HASH
         sync: false
-      - key: DB_PATH
-        value: /var/data/vendors.db
-    disk:
-      name: vendors-db
-      mountPath: /var/data
-      sizeGB: 1
+      - key: JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
