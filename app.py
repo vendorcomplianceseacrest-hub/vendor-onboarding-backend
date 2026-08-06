@@ -435,6 +435,10 @@ def get_email_log():
     rows = c.fetchall(); conn.close()
     return jsonify([dict(r) for r in rows])
 
+@app.route("/")
+def index():
+    return jsonify({"status":"ok","service":"vendor-onboarding-api"})
+
 @app.route("/health")
 def health():
     return jsonify({"status":"ok"})
