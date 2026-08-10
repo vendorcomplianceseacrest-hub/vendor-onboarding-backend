@@ -166,12 +166,12 @@ def build_needed_list(v, assocs_map):
     wc_type = v.get("wc_type","coi")
     if wc_type != "none":
         s2 = date_status(v.get("wc_exp",""))
-        label = "WC Exemption" if wc_type=="exempt" else "WC COI"
+        label = "Workers' Comp COI or Workers' Comp Exemption"
         if s2 != "ok": needed.append(label if s2=="missing" else f"{label} ({s2})")
     bl_type = v.get("bl_type","license")
     if bl_type != "none":
         s3 = date_status(v.get("bl_exp",""))
-        label = "Business Tax Receipt" if bl_type=="btr" else "Business License"
+        label = "Business License or Business Tax Receipt"
         if s3 != "ok": needed.append(label if s3=="missing" else f"{label} ({s3})")
     if not v.get("w9"): needed.append("W9")
     return needed
