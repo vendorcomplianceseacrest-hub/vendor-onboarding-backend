@@ -133,6 +133,8 @@ def seed_associations(c):
 # ── Gmail SMTP ──────────────────────────────────────────────────────────────
 
 def send_email_gmail(to_email, cc_emails, subject, body_text):
+    if not GMAIL_USER or not GMAIL_PASS:
+        raise RuntimeError("Email is not configured on the server (missing GMAIL_USER / GMAIL_APP_PASSWORD)")
     msg = MIMEMultipart()
     msg["From"]     = f"Seacrest Southwest <{GMAIL_USER}>"
     msg["To"]       = to_email
@@ -142,7 +144,10 @@ def send_email_gmail(to_email, cc_emails, subject, body_text):
         msg["Cc"] = ", ".join(e for e in cc_emails if e)
     msg.attach(MIMEText(body_text, "plain"))
     all_recipients = [to_email] + [e for e in cc_emails if e]
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    # timeout=10 so a blocked/stalled connection fails fast with a real error
+    # instead of hanging until the gunicorn worker is killed (which surfaced
+    # to users as an endless "Sending..." spinner followed by a bare 503).
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
         server.login(GMAIL_USER, GMAIL_PASS)
         server.sendmail(GMAIL_USER, all_recipients, msg.as_string())
 
@@ -410,6 +415,71 @@ def send_vendor_email(vid):
     conn.commit(); conn.close()
     return jsonify({"ok":True,"logged":True})
 
+@app.route("/api/vendors/bulk-send-email", methods=["POST"])
+@require_auth
+def bulk_send_vendor_email():
+    """Send the onboarding-documents email to several vendors in one request.
+
+    Body: {"vendor_ids": ["id1","id2",...]}  (optional — omit/empty to target
+    every vendor that currently has outstanding docs and an email on file).
+
+    Each vendor is attempted independently so one bad address or one failed
+    send doesn't block the rest of the batch; per-vendor results are returned
+    so the caller can show exactly what succeeded and what needs attention.
+    """
+    import uuid
+    vendor_ids = (request.json or {}).get("vendor_ids") or []
+    conn = get_db(); c = conn.cursor()
+    c.execute("SELECT * FROM associations")
+    assocs = {r["tag"]: dict(r) for r in c.fetchall()}
+
+    if vendor_ids:
+        c.execute("SELECT * FROM vendors WHERE id = ANY(%s)", (vendor_ids,))
+        vendors = [dict(r) for r in c.fetchall()]
+        found_ids = {v["id"] for v in vendors}
+        missing = [vid for vid in vendor_ids if vid not in found_ids]
+    else:
+        c.execute("SELECT * FROM vendors")
+        vendors = [dict(r) for r in c.fetchall()]
+        missing = []
+
+    results = [{"vendor_id": vid, "ok": False, "error": "Vendor not found"} for vid in missing]
+
+    for v in vendors:
+        vid = v["id"]
+        needed = build_needed_list(v, assocs)
+        if not needed:
+            if vendor_ids:  # explicit target with nothing outstanding is worth reporting
+                results.append({"vendor_id": vid, "vendor_name": v["name"], "ok": False,
+                                 "error": "No documents outstanding"})
+            continue
+        if not v.get("email"):
+            results.append({"vendor_id": vid, "vendor_name": v["name"], "ok": False,
+                             "error": "No vendor email on file"})
+            continue
+
+        subject   = f"New Vendor Setup — Required Documents for {v['name']}"
+        body      = build_email_body(v, assocs, needed)
+        ccs       = get_cc_list(v, assocs)
+        cc_emails = [c2["email"] for c2 in ccs]
+        try:
+            send_email_gmail(v["email"], cc_emails, subject, body)
+        except Exception as e:
+            results.append({"vendor_id": vid, "vendor_name": v["name"], "ok": False, "error": str(e)})
+            continue
+
+        log_id = str(uuid.uuid4())
+        c.execute("""INSERT INTO email_log (id,vendor_id,vendor_name,vendor_email,sent_at,docs_requested,cc_list)
+                     VALUES (%s,%s,%s,%s,%s,%s,%s)""",
+                  (log_id, vid, v["name"], v["email"], datetime.utcnow().isoformat(),
+                   json.dumps(needed), json.dumps(ccs)))
+        conn.commit()
+        results.append({"vendor_id": vid, "vendor_name": v["name"], "ok": True})
+
+    conn.close()
+    sent = sum(1 for r in results if r["ok"])
+    return jsonify({"ok": True, "sent": sent, "failed": len(results) - sent, "results": results})
+
 @app.route("/api/preview-email/<vid>", methods=["GET"])
 @require_auth
 def preview_email(vid):
@@ -446,3 +516,4 @@ def health():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)))
+    Fix send-email hang, add bulk send
