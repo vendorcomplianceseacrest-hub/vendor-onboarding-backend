@@ -86,6 +86,7 @@ def init_db():
             email TEXT DEFAULT '',
             sender TEXT DEFAULT 'Sandra',
             gl_exp TEXT DEFAULT '',
+            gl_type TEXT DEFAULT 'coi',
             wc_exp TEXT DEFAULT '',
             wc_type TEXT DEFAULT 'coi',
             bl_exp TEXT DEFAULT '',
@@ -166,7 +167,7 @@ def date_status(d):
 
 def build_needed_list(v, assocs_map):
     needed = []
-    s = date_status(v.get("gl_exp",""))
+    s = date_status(v.get("gl_exp","")) if v.get("gl_type","coi") != "none" else "ok"
     if s != "ok": needed.append("General Liability COI" if s=="missing" else f"GL COI ({s})")
     wc_type = v.get("wc_type","coi")
     if wc_type != "none":
@@ -305,10 +306,10 @@ def create_vendor():
     data = request.json; vid = str(uuid.uuid4()); now = datetime.utcnow().isoformat()
     conn = get_db(); c = conn.cursor()
     c.execute("""INSERT INTO vendors
-        (id,name,email,sender,gl_exp,wc_exp,wc_type,bl_exp,bl_type,w9,tags,notes,cois_on_file,created_at,updated_at)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+        (id,name,email,sender,gl_exp,gl_type,wc_exp,wc_type,bl_exp,bl_type,w9,tags,notes,cois_on_file,created_at,updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (vid,data["name"],data.get("email",""),data.get("sender","Sandra"),
-         data.get("gl_exp",""),data.get("wc_exp",""),data.get("wc_type","coi"),
+         data.get("gl_exp",""),data.get("gl_type","coi"),data.get("wc_exp",""),data.get("wc_type","coi"),
          data.get("bl_exp",""),data.get("bl_type","license"),
          1 if data.get("w9") else 0,data.get("tags",""),data.get("notes",""),
          json.dumps(data.get("cois_on_file",{})),now,now))
@@ -330,10 +331,10 @@ def import_vendors():
         filtered_tags = ", ".join(t for t in raw_tags if t in known)
         vid = str(uuid.uuid4())
         c.execute("""INSERT INTO vendors
-            (id,name,email,sender,gl_exp,wc_exp,wc_type,bl_exp,bl_type,w9,tags,notes,cois_on_file,created_at,updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (id,name,email,sender,gl_exp,gl_type,wc_exp,wc_type,bl_exp,bl_type,w9,tags,notes,cois_on_file,created_at,updated_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (vid,v["name"],v.get("email",""),v.get("sender","Sandra"),
-             v.get("gl_exp",""),v.get("wc_exp",""),v.get("wc_type","coi"),
+             v.get("gl_exp",""),v.get("gl_type","coi"),v.get("wc_exp",""),v.get("wc_type","coi"),
              v.get("bl_exp",""),v.get("bl_type","license"),
              1 if v.get("w9") else 0,filtered_tags,v.get("notes",""),"{}", now, now))
         added += 1
@@ -350,11 +351,11 @@ def update_vendor(vid):
     raw_tags = [t.strip().upper() for t in (data.get("tags","") or "").split(",") if t.strip()]
     filtered_tags = ", ".join(t for t in raw_tags if t in known)
     c.execute("""UPDATE vendors SET
-        name=%s,email=%s,sender=%s,gl_exp=%s,wc_exp=%s,wc_type=%s,
+        name=%s,email=%s,sender=%s,gl_exp=%s,gl_type=%s,wc_exp=%s,wc_type=%s,
         bl_exp=%s,bl_type=%s,w9=%s,tags=%s,notes=%s,cois_on_file=%s,updated_at=%s
         WHERE id=%s""",
         (data["name"],data.get("email",""),data.get("sender","Sandra"),
-         data.get("gl_exp",""),data.get("wc_exp",""),data.get("wc_type","coi"),
+         data.get("gl_exp",""),data.get("gl_type","coi"),data.get("wc_exp",""),data.get("wc_type","coi"),
          data.get("bl_exp",""),data.get("bl_type","license"),
          1 if data.get("w9") else 0,filtered_tags,data.get("notes",""),
          json.dumps(data.get("cois_on_file",{})),now,vid))
