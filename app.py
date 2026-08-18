@@ -165,6 +165,12 @@ def date_status(d):
         return "ok"
     except: return "missing"
 
+def normalize_vendor(v):
+    v["gl_type"] = (v.get("gl_type") or "coi").strip().lower()
+    v["wc_type"] = (v.get("wc_type") or "coi").strip().lower()
+    v["bl_type"] = (v.get("bl_type") or "license").strip().lower()
+    return v
+
 def build_needed_list(v, assocs_map):
     needed = []
     s = date_status(v.get("gl_exp","")) if v.get("gl_type","coi") != "none" else "ok"
@@ -293,6 +299,7 @@ def get_vendors():
     result = []
     for v in vendors:
         vd = dict(v)
+        vd = normalize_vendor(vd)
         c.execute("SELECT * FROM email_log WHERE vendor_id=%s ORDER BY sent_at DESC",(v["id"],))
         vd["email_log"] = [dict(l) for l in c.fetchall()]
         result.append(vd)
@@ -395,6 +402,7 @@ def send_vendor_email(vid):
     v = c.fetchone()
     if not v: conn.close(); return jsonify({"error":"Vendor not found"}), 404
     v = dict(v)
+    v = normalize_vendor(v)
     c.execute("SELECT * FROM associations")
     assocs = {r["tag"]:dict(r) for r in c.fetchall()}
     needed = build_needed_list(v, assocs)
@@ -489,6 +497,7 @@ def preview_email(vid):
     v = c.fetchone()
     if not v: conn.close(); return jsonify({"error":"Not found"}), 404
     v = dict(v)
+    v = normalize_vendor(v)
     c.execute("SELECT * FROM associations")
     assocs = {r["tag"]:dict(r) for r in c.fetchall()}
     conn.close()
