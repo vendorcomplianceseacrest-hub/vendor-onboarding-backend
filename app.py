@@ -211,6 +211,12 @@ def build_needed_list(v, assocs_map):
 def build_email_body(v, assocs_map, needed):
     tags = [t.strip().upper() for t in (v.get("tags") or "").split(",") if t.strip()]
     sender = v.get("sender") or "Sandra"
+    cois_on_file = v.get("cois_on_file") or {}
+    if isinstance(cois_on_file, str):
+        try:
+            cois_on_file = json.loads(cois_on_file) or {}
+        except (ValueError, TypeError):
+            cois_on_file = {}
     body = f"Dear {v['name']} Team,\n\nThank you for your interest in becoming an approved vendor. To complete your setup and get you added to our vendor list, we need the following documents on file:\n\n"
     for i, item in enumerate(needed, 1):
         body += f"{i}. {item}\n"
@@ -220,11 +226,29 @@ def build_email_body(v, assocs_map, needed):
     # meant a vendor with a current, on-file GL/WC COI still got told to
     # send one, which reads as "still asking for it" even though it had
     # already been dropped from the numbered list above.
+    #
+    # Within that, an association whose per-association GL/WC box has
+    # already been checked off (cois_on_file) doesn't need to be asked
+    # for again either — otherwise an association marked as on file still
+    # showed up in this list every time the vendor's overall COI was
+    # outstanding for a different association.
+    # cois_on_file is keyed by association tag; be tolerant of tag/flag
+    # casing since it's populated by the frontend, not this API.
+    cois_on_file_ci = {(k or "").strip().upper(): (val or {}) for k, val in cois_on_file.items()}
+
+    def _coi_flag(tag, flag):
+        entry = cois_on_file_ci.get(tag, {})
+        if not isinstance(entry, dict):
+            return bool(entry)
+        return bool(entry.get(flag) or entry.get(flag.upper()) or entry.get(flag.lower()))
+
     gl_outstanding = v.get("gl_type","coi") != "none" and date_status(v.get("gl_exp","")) != "ok"
     wc_outstanding = v.get("wc_type","coi") == "coi" and date_status(v.get("wc_exp","")) != "ok"
-    if tags and gl_outstanding:
+    gl_tags = [t for t in tags if not _coi_flag(t, "gl")]
+    wc_tags = [t for t in tags if not _coi_flag(t, "wc")]
+    if gl_tags and gl_outstanding:
         body += "\nYour General Liability COI must list each of the following as an Additional Insured / Certificate Holder — please provide a separate COI (or endorsement) for each association:\n\n"
-        for i, tag in enumerate(tags, 1):
+        for i, tag in enumerate(gl_tags, 1):
             a = assocs_map.get(tag)
             body += f"{i}. "
             if a:
@@ -232,9 +256,9 @@ def build_email_body(v, assocs_map, needed):
                 if a.get("address"): body += f"\n   {a['address']}"
             else: body += tag
             body += "\n\n"
-    if tags and wc_outstanding:
+    if wc_tags and wc_outstanding:
         body += "Your Workers' Comp COI must also list each of the following as Certificate Holder:\n\n"
-        for i, tag in enumerate(tags, 1):
+        for i, tag in enumerate(wc_tags, 1):
             a = assocs_map.get(tag)
             body += f"{i}. "
             if a:
