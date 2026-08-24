@@ -154,16 +154,36 @@ def send_email_gmail(to_email, cc_emails, subject, body_text):
 
 # ── Email building ──────────────────────────────────────────────────────────
 
-def date_status(d):
-    if not d: return "missing"
+def parse_exp_date(d):
+    """Parse an expiration date that may come in as strict ISO (YYYY-MM-DD,
+    what the vendor edit form's <input type=date> always produces) OR as a
+    US-style MM/DD/YYYY or M/D/YYYY string (what the CSV importer sends
+    verbatim from the spreadsheet, unconverted). Returns a date or None."""
+    if not d: return None
     from datetime import date
+    import re
+    d = str(d).strip()
     try:
-        exp = date.fromisoformat(d)
-        delta = (exp - date.today()).days
-        if delta < 0: return "expired"
-        if delta <= 30: return "expiring"
-        return "ok"
-    except: return "missing"
+        return date.fromisoformat(d)
+    except ValueError:
+        pass
+    m = re.match(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$', d)
+    if m:
+        month, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+    return None
+
+def date_status(d):
+    from datetime import date
+    exp = parse_exp_date(d)
+    if exp is None: return "missing"
+    delta = (exp - date.today()).days
+    if delta < 0: return "expired"
+    if delta <= 30: return "expiring"
+    return "ok"
 
 def normalize_vendor(v):
     v["gl_type"] = (v.get("gl_type") or "coi").strip().lower()
@@ -194,7 +214,15 @@ def build_email_body(v, assocs_map, needed):
     body = f"Dear {v['name']} Team,\n\nThank you for your interest in becoming an approved vendor. To complete your setup and get you added to our vendor list, we need the following documents on file:\n\n"
     for i, item in enumerate(needed, 1):
         body += f"{i}. {item}\n"
-    if tags:
+    # These "must list each association" instructions only make sense when
+    # we're actually still asking the vendor to (re)send that COI. Gating
+    # only on whether the vendor has association tags — as this used to do —
+    # meant a vendor with a current, on-file GL/WC COI still got told to
+    # send one, which reads as "still asking for it" even though it had
+    # already been dropped from the numbered list above.
+    gl_outstanding = v.get("gl_type","coi") != "none" and date_status(v.get("gl_exp","")) != "ok"
+    wc_outstanding = v.get("wc_type","coi") == "coi" and date_status(v.get("wc_exp","")) != "ok"
+    if tags and gl_outstanding:
         body += "\nYour General Liability COI must list each of the following as an Additional Insured / Certificate Holder — please provide a separate COI (or endorsement) for each association:\n\n"
         for i, tag in enumerate(tags, 1):
             a = assocs_map.get(tag)
@@ -204,16 +232,16 @@ def build_email_body(v, assocs_map, needed):
                 if a.get("address"): body += f"\n   {a['address']}"
             else: body += tag
             body += "\n\n"
-        if v.get("wc_type","coi") == "coi":
-            body += "Your Workers' Comp COI must also list each of the following as Certificate Holder:\n\n"
-            for i, tag in enumerate(tags, 1):
-                a = assocs_map.get(tag)
-                body += f"{i}. "
-                if a:
-                    body += a["name"]
-                    if a.get("address"): body += f"\n   {a['address']}"
-                else: body += tag
-                body += "\n\n"
+    if tags and wc_outstanding:
+        body += "Your Workers' Comp COI must also list each of the following as Certificate Holder:\n\n"
+        for i, tag in enumerate(tags, 1):
+            a = assocs_map.get(tag)
+            body += f"{i}. "
+            if a:
+                body += a["name"]
+                if a.get("address"): body += f"\n   {a['address']}"
+            else: body += tag
+            body += "\n\n"
     body += f"Please reply to this email with all required documents attached. Once everything is received and verified, we will finalize your vendor account and you will be ready to receive work orders.\n\nIf you have any questions, please don't hesitate to reach out.\n\nThank you,\n{sender}"
     return body
 
@@ -316,8 +344,9 @@ def create_vendor():
         (id,name,email,sender,gl_exp,gl_type,wc_exp,wc_type,bl_exp,bl_type,w9,tags,notes,cois_on_file,created_at,updated_at)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
         (vid,data["name"],data.get("email",""),data.get("sender","Sandra"),
-         data.get("gl_exp",""),data.get("gl_type","coi"),data.get("wc_exp",""),data.get("wc_type","coi"),
-         data.get("bl_exp",""),data.get("bl_type","license"),
+         data.get("gl_exp",""),(data.get("gl_type") or "coi").strip().lower(),
+         data.get("wc_exp",""),(data.get("wc_type") or "coi").strip().lower(),
+         data.get("bl_exp",""),(data.get("bl_type") or "license").strip().lower(),
          1 if data.get("w9") else 0,data.get("tags",""),data.get("notes",""),
          json.dumps(data.get("cois_on_file",{})),now,now))
     conn.commit(); conn.close()
@@ -331,22 +360,62 @@ def import_vendors():
     conn = get_db(); c = conn.cursor()
     c.execute("SELECT tag FROM associations")
     known = {r["tag"] for r in c.fetchall()}
-    added = 0
+
+    # Match incoming rows against existing vendors so a re-upload of the same
+    # master list UPDATES the vendor already on file (including its
+    # expiration dates) instead of creating a duplicate row. Matched first by
+    # email (most reliable), then falls back to an exact name match.
+    c.execute("SELECT id, name, email, gl_type, wc_type, bl_type, w9 FROM vendors")
+    existing_rows = [dict(r) for r in c.fetchall()]
+    by_email = {r["email"].strip().lower(): r["id"] for r in existing_rows if r.get("email")}
+    by_name  = {r["name"].strip().lower(): r["id"] for r in existing_rows if r.get("name")}
+
+    added = updated = 0
     for v in vendors_in:
         if not v.get("name"): continue
         raw_tags = [t.strip().upper() for t in (v.get("tags","") or "").split(",") if t.strip()]
         filtered_tags = ", ".join(t for t in raw_tags if t in known)
-        vid = str(uuid.uuid4())
-        c.execute("""INSERT INTO vendors
-            (id,name,email,sender,gl_exp,gl_type,wc_exp,wc_type,bl_exp,bl_type,w9,tags,notes,cois_on_file,created_at,updated_at)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (vid,v["name"],v.get("email",""),v.get("sender","Sandra"),
-             v.get("gl_exp",""),v.get("gl_type","coi"),v.get("wc_exp",""),v.get("wc_type","coi"),
-             v.get("bl_exp",""),v.get("bl_type","license"),
-             1 if v.get("w9") else 0,filtered_tags,v.get("notes",""),"{}", now, now))
-        added += 1
+        email_key = (v.get("email") or "").strip().lower()
+        name_key  = v["name"].strip().lower()
+        match_id = by_email.get(email_key) if email_key else None
+        if not match_id:
+            match_id = by_name.get(name_key)
+
+        if match_id:
+            # The CSV mapper always sends gl_type/wc_type/bl_type/w9 with a
+            # default value (coi/license/false) even when the user left that
+            # column unmapped, so a plain overwrite here would silently wipe
+            # out a "Not Required" flag or a confirmed W9 that was set by
+            # hand in the vendor edit form on every re-upload of the sheet.
+            # Preserve whatever is already on file for those four fields on
+            # an update; the CSV only drives identity, dates, and tags.
+            c.execute("""UPDATE vendors SET
+                name=%s,email=%s,sender=%s,gl_exp=%s,wc_exp=%s,
+                bl_exp=%s,tags=%s,updated_at=%s
+                WHERE id=%s""",
+                (v["name"],v.get("email",""),v.get("sender","Sandra"),
+                 v.get("gl_exp",""),v.get("wc_exp",""),
+                 v.get("bl_exp",""),filtered_tags,now,match_id))
+            updated += 1
+        else:
+            gl_type = (v.get("gl_type") or "coi").strip().lower()
+            wc_type = (v.get("wc_type") or "coi").strip().lower()
+            bl_type = (v.get("bl_type") or "license").strip().lower()
+            vid = str(uuid.uuid4())
+            c.execute("""INSERT INTO vendors
+                (id,name,email,sender,gl_exp,gl_type,wc_exp,wc_type,bl_exp,bl_type,w9,tags,notes,cois_on_file,created_at,updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (vid,v["name"],v.get("email",""),v.get("sender","Sandra"),
+                 v.get("gl_exp",""),gl_type,v.get("wc_exp",""),wc_type,
+                 v.get("bl_exp",""),bl_type,
+                 1 if v.get("w9") else 0,filtered_tags,v.get("notes",""),"{}", now, now))
+            # Newly-inserted vendors are matchable by later rows in the same
+            # CSV too (e.g. duplicate rows for the same vendor).
+            if email_key: by_email[email_key] = vid
+            by_name[name_key] = vid
+            added += 1
     conn.commit(); conn.close()
-    return jsonify({"added":added,"ok":True})
+    return jsonify({"added":added,"updated":updated,"ok":True})
 
 @app.route("/api/vendors/<vid>", methods=["PUT"])
 @require_auth
@@ -362,8 +431,9 @@ def update_vendor(vid):
         bl_exp=%s,bl_type=%s,w9=%s,tags=%s,notes=%s,cois_on_file=%s,updated_at=%s
         WHERE id=%s""",
         (data["name"],data.get("email",""),data.get("sender","Sandra"),
-         data.get("gl_exp",""),data.get("gl_type","coi"),data.get("wc_exp",""),data.get("wc_type","coi"),
-         data.get("bl_exp",""),data.get("bl_type","license"),
+         data.get("gl_exp",""),(data.get("gl_type") or "coi").strip().lower(),
+         data.get("wc_exp",""),(data.get("wc_type") or "coi").strip().lower(),
+         data.get("bl_exp",""),(data.get("bl_type") or "license").strip().lower(),
          1 if data.get("w9") else 0,filtered_tags,data.get("notes",""),
          json.dumps(data.get("cois_on_file",{})),now,vid))
     conn.commit(); conn.close()
@@ -456,6 +526,7 @@ def bulk_send_vendor_email():
 
     for v in vendors:
         vid = v["id"]
+        v = normalize_vendor(v)
         needed = build_needed_list(v, assocs)
         if not needed:
             if vendor_ids:  # explicit target with nothing outstanding is worth reporting
